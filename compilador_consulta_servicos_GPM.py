@@ -25,7 +25,7 @@ NEW_FOLDER_ID = "1QHtqMNCcIzNihwnu3copkNmBZnaL6Z6z"
 OUTPUT_CSV_NAME = "BANCO.csv"
 FOLDER_ID = "17IobcQeVLs83rUCqWKTi18yXiAPbupjf"  # Novo ID para upload do arquivo gerado no Drive
 SPREADSHEET_ID = "1B_ZAktVrIoY_qGg9vhjMabmNqGMeHODtWPR8nmFp61A"  # Novo ID da planilha Google Sheets
-SHEET_NAME = "BD_Precificacao"
+SHEET_NAME = "BD_ConsultaServ"
 
 UPLOAD_BANCO_PARA_DRIVE = True
 
