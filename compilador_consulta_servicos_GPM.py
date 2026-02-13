@@ -163,12 +163,6 @@ def to_number_ptbr(value):
     except:
         return 0.0
 
-# Função para garantir que as colunas de data sejam convertidas para string
-def convert_timestamp_to_string(df):
-    for col in df.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']):
-        df[col] = df[col].dt.strftime('%d/%m/%Y %H:%M:%S')  # Formato de data desejado
-    return df
-
 
 # =========================
 # SHEETS HELPERS
@@ -205,6 +199,23 @@ def upload_to_sheets(service, df):
         valueInputOption="RAW",
         body={"values": [[timestamp]]}
     ).execute()
+
+
+# =========================
+# Função para garantir que a coluna de data seja convertida corretamente para o formato brasileiro
+def convert_timestamp_to_string(df):
+    # Tratando a coluna 'dta_exec_srv' (coluna F) para garantir que está no formato correto
+    if 'dta_exec_srv' in df.columns:
+        # Converte os valores da coluna para datetime, com erros sendo tratados
+        df['dta_exec_srv'] = pd.to_datetime(df['dta_exec_srv'], errors='coerce', dayfirst=True)
+
+        # Substitui valores de data inválidos (NaT) por uma data padrão ou deixa como vazio
+        df['dta_exec_srv'] = df['dta_exec_srv'].fillna('01/01/1900')
+
+        # Formata a coluna de data para o formato brasileiro
+        df['dta_exec_srv'] = df['dta_exec_srv'].dt.strftime('%d/%m/%Y')
+
+    return df
 
 
 # =========================
@@ -278,6 +289,9 @@ def main():
     banco_df["dta_exec_srv"] = pd.to_datetime(banco_df["dta_exec_srv"], errors="coerce")
     banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
 
+    # Chama a função para converter a coluna de data
+    banco_df = convert_timestamp_to_string(banco_df)
+
     banco_df = banco_df.sort_values(
         by=["dta_exec_srv"],
         ascending=True,
@@ -292,9 +306,6 @@ def main():
         decimal=",",
         float_format="%.2f"
     )
-
-    # Convertendo qualquer coluna Timestamp para string
-    banco_df = convert_timestamp_to_string(banco_df)
 
     # ✅ Enviar os dados processados para a planilha do Google Sheets
     upload_to_sheets(sheets_service, banco_df)
