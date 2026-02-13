@@ -163,6 +163,12 @@ def to_number_ptbr(value):
     except:
         return 0.0
 
+# Função para garantir que as colunas de data sejam convertidas para string
+def convert_timestamp_to_string(df):
+    for col in df.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']):
+        df[col] = df[col].dt.strftime('%d/%m/%Y %H:%M:%S')  # Formato de data desejado
+    return df
+
 
 # =========================
 # SHEETS HELPERS
@@ -286,6 +292,9 @@ def main():
         decimal=",",
         float_format="%.2f"
     )
+
+    # Convertendo qualquer coluna Timestamp para string
+    banco_df = convert_timestamp_to_string(banco_df)
 
     # ✅ Enviar os dados processados para a planilha do Google Sheets
     upload_to_sheets(sheets_service, banco_df)
