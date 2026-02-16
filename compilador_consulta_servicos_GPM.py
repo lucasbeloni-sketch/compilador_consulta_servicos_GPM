@@ -327,16 +327,24 @@ def main():
     banco_df["arquivo_origem"] = origem_col.values
 
     banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
-    banco_df["dta_exec_srv"] = pd.to_datetime(banco_df["dta_exec_srv"], errors="coerce")
+    # converte para datetime real (formato brasileiro)
+    banco_df["dta_exec_srv"] = pd.to_datetime(
+        banco_df["dta_exec_srv"],
+        errors="coerce",
+        dayfirst=True
+    )
+
     banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
 
-    banco_df = convert_timestamp_to_string(banco_df)
-
+    # ordenação cronológica real
     banco_df = banco_df.sort_values(
-        by=["dta_exec_srv"],
+        by="dta_exec_srv",
         ascending=True,
         kind="mergesort"
     ).reset_index(drop=True)
+
+    # só depois da ordenação, converte para string dd/mm/yyyy
+    banco_df["dta_exec_srv"] = banco_df["dta_exec_srv"].dt.strftime("%d/%m/%Y")
 
     banco_df.to_csv(
         OUTPUT_CSV_NAME,
