@@ -194,11 +194,16 @@ def clear_range(service, spreadsheet_id, range_):
 
 
 def upload_to_sheets(service, df):
-    df = df.fillna("")
-    values = df.values.tolist()
+    # mantém apenas colunas A:G
+    df_sheets = df.iloc[:, :7].copy()
 
-    clear_range(service, SPREADSHEET_ID, f"{SHEET_NAME}!A3:H")
+    df_sheets = df_sheets.fillna("")
+    values = df_sheets.values.tolist()
 
+    # limpa apenas A:G
+    clear_range(service, SPREADSHEET_ID, f"{SHEET_NAME}!A3:G")
+
+    # cola a partir de A3 somente A:G
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{SHEET_NAME}!A3",
