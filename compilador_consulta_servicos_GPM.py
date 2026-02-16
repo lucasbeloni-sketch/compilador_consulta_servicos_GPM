@@ -32,7 +32,6 @@ READ_CSV_KWARGS = dict(
     engine="python"
 )
 
-# +1 coluna agora (arquivo_origem)
 KEEP_COL_POS_1BASED = [47, 6, 27, 50, 52, 68, 70]
 
 # =========================
@@ -304,6 +303,9 @@ def main():
             f"preenchimento: {pct:.2f}%"
         )
 
+    # ===== PRESERVA ORIGEM =====
+    origem_col = banco_df["arquivo_origem"].copy()
+
     banco_df = keep_only_columns_by_position(banco_df, KEEP_COL_POS_1BASED)
 
     banco_df.columns = [
@@ -316,8 +318,8 @@ def main():
         "total_servicos"
     ]
 
-    # adiciona coluna H
-    banco_df["arquivo_origem"] = banco_df["arquivo_origem"]
+    # reaplica coluna H
+    banco_df["arquivo_origem"] = origem_col.values
 
     banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
     banco_df["dta_exec_srv"] = pd.to_datetime(banco_df["dta_exec_srv"], errors="coerce")
