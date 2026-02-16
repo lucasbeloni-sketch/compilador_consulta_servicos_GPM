@@ -1,9 +1,9 @@
-name: Consulta Serviços GPM
+name: Consulta Serviços GPM 
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"  # a cada 6h (UTC)
+    - cron: "0 * * * *"  # a cada 1h (UTC)
 
 jobs:
   run_compilador:
