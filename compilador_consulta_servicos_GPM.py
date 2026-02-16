@@ -1,146 +1,311 @@
 import os
-import io
-import base64
 import json
+import base64
 import pandas as pd
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 # =========================
 # CONFIG
 # =========================
+SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 
-PASTA_GOOGLE_DRIVE = "Consulta_Servico"
+NEW_FOLDER_ID = "1QHtqMNCcIzNihwnu3copkNmBZnaL6Z6z"
+OUTPUT_CSV_NAME = "BANCO.csv"
+FOLDER_ID = "17IobcQeVLs83rUCqWKTi18yXiAPbupjf"
+SPREADSHEET_ID = "1B_ZAktVrIoY_qGg9vhjMabmNqGMeHODtWPR8nmFp61A"
+SHEET_NAME = "BD_ConsultaServ"
 
-ARQUIVO_IGNORADO = "HISTÓRICO - EM001 e EM002 - 10.2023 até 03.2024.csv"
+UPLOAD_BANCO_PARA_DRIVE = True
 
-KEEP_COL_POS_1BASED = [1, 2, 3, 4, 5, 6, 7]  # colunas A:G
+READ_CSV_KWARGS = dict(
+    dtype=str,
+    encoding="utf-8-sig",
+    sep=None,
+    engine="python"
+)
 
-OUTPUT_CSV = "BANCO.csv"
+KEEP_COL_POS_1BASED = [47, 6, 27, 50, 52, 68, 70]
 
 # =========================
-# GOOGLE DRIVE AUTH (CI/CD)
+# AUTH
 # =========================
+def get_credentials():
+    secret = os.getenv("GOOGLE_CREDENTIALS_B64")
+    if not secret:
+        raise ValueError("O secret 'GOOGLE_CREDENTIALS_B64' não foi encontrado ou está vazio!")
 
-def get_drive_service():
-    b64 = os.environ.get("GOOGLE_CREDENTIALS_B64")
+    credentials_json = base64.b64decode(secret).decode("utf-8")
+    info = json.loads(credentials_json)
 
-    if not b64:
-        raise Exception("Variável de ambiente GOOGLE_CREDENTIALS_B64 não definida")
-
-    json_bytes = base64.b64decode(b64)
-    creds_dict = json.loads(json_bytes.decode("utf-8"))
-
-    creds = service_account.Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/drive"]
+    return service_account.Credentials.from_service_account_info(
+        info, scopes=SCOPES
     )
 
-    return build("drive", "v3", credentials=creds)
+
+def get_drive_service():
+    return build("drive", "v3", credentials=get_credentials())
+
+
+def get_sheets_service():
+    return build("sheets", "v4", credentials=get_credentials())
+
 
 # =========================
-# DRIVE FUNCTIONS
+# DRIVE HELPERS
 # =========================
+def list_files(service, folder_id, drive_id):
+    query = f"'{folder_id}' in parents and trashed = false"
+    files = []
+    token = None
 
-def get_folder_id(service, folder_name):
-    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-    res = service.files().list(q=query, fields="files(id,name)").execute()
-    files = res.get("files", [])
-    if not files:
-        raise Exception(f"Pasta não encontrada: {folder_name}")
-    return files[0]["id"]
+    while True:
+        resp = service.files().list(
+            q=query,
+            pageToken=token,
+            pageSize=1000,
+            fields="nextPageToken, files(id,name,mimeType)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            corpora="drive",
+            driveId=drive_id,
+        ).execute()
 
-def list_csv_files(service, folder_id):
-    query = f"'{folder_id}' in parents and trashed=false"
-    res = service.files().list(
+        files.extend(resp.get("files", []))
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+
+    return files
+
+
+def download_file(service, file_id, filename):
+    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+    with open(filename, "wb") as f:
+        downloader = MediaIoBaseDownload(f, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+
+def find_file_in_folder(service, folder_id, drive_id, filename):
+    query = (
+        f"'{folder_id}' in parents and trashed = false and "
+        f"name = '{filename}'"
+    )
+
+    resp = service.files().list(
         q=query,
-        fields="files(id,name,mimeType)"
+        fields="files(id,name)",
+        pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+        corpora="drive",
+        driveId=drive_id,
     ).execute()
 
-    files = res.get("files", [])
-    csvs = [f for f in files if f["name"].lower().endswith(".csv")]
-    return csvs
+    files = resp.get("files", [])
+    return files[0]["id"] if files else None
 
-def download_file(service, file_id):
-    request = service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = request.execute()
-    fh.write(downloader)
-    fh.seek(0)
-    return fh.read()
+
+def upload_or_update_banco(drive_service, folder_id, drive_id, local_path, filename):
+    media = MediaFileUpload(local_path, mimetype="text/csv", resumable=True)
+    existing_id = find_file_in_folder(drive_service, folder_id, drive_id, filename)
+
+    if existing_id:
+        drive_service.files().update(
+            fileId=existing_id,
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
+        return "updated"
+
+    drive_service.files().create(
+        body={"name": filename, "parents": [folder_id]},
+        media_body=media,
+        supportsAllDrives=True
+    ).execute()
+    return "created"
+
 
 # =========================
-# DATA FUNCTIONS
+# DATA HELPERS
 # =========================
-
 def keep_only_columns_by_position(df, positions_1based):
     idx = [p - 1 for p in positions_1based]
     return df.iloc[:, idx]
 
+
+def to_number_ptbr(value):
+    if value is None:
+        return 0.0
+    s = str(value).strip()
+    if s == "" or s.lower() == "nan":
+        return 0.0
+    s = s.replace(" ", "")
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except:
+        return 0.0
+
+
+# =========================
+# LOG DIAGNÓSTICO
+# =========================
+def log_dta_exec_stats(filename, df):
+    total_rows = len(df)
+
+    if 'dta_exec_srv' in df.columns:
+        col = df['dta_exec_srv']
+        non_empty = (col.astype(str).str.strip() != "").sum()
+        null_or_empty = total_rows - non_empty
+        pct = (non_empty / total_rows * 100) if total_rows > 0 else 0
+
+        print(
+            f"[LOG] {filename} | linhas: {total_rows} | "
+            f"dta_exec_srv preenchidos: {non_empty} | "
+            f"em branco/nulos: {null_or_empty} | "
+            f"preenchimento: {pct:.2f}%"
+        )
+    else:
+        print(
+            f"[LOG] {filename} | linhas: {total_rows} | "
+            f"COLUNA 'dta_exec_srv' NÃO EXISTE"
+        )
+
+
+# =========================
+# SHEETS HELPERS
+# =========================
+def clear_range(service, spreadsheet_id, range_):
+    service.spreadsheets().values().clear(
+        spreadsheetId=spreadsheet_id,
+        range=range_
+    ).execute()
+
+
+def upload_to_sheets(service, df):
+    df = df.fillna("")
+    values = df.values.tolist()
+
+    clear_range(service, SPREADSHEET_ID, f"{SHEET_NAME}!A3:H")
+
+    service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{SHEET_NAME}!A3",
+        valueInputOption="RAW",
+        body={"values": values}
+    ).execute()
+
+    timestamp = datetime.now(
+        ZoneInfo("America/Sao_Paulo")
+    ).strftime("%d/%m/%Y %H:%M:%S")
+
+    service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{SHEET_NAME}!B1",
+        valueInputOption="RAW",
+        body={"values": [[timestamp]]}
+    ).execute()
+
+
+# =========================
+# DATA FORMAT
+# =========================
+def convert_timestamp_to_string(df):
+    if 'dta_exec_srv' in df.columns:
+        df['dta_exec_srv'] = pd.to_datetime(df['dta_exec_srv'], errors='coerce', dayfirst=True)
+        df['dta_exec_srv'] = df['dta_exec_srv'].dt.strftime('%d/%m/%Y')
+    return df
+
+
 # =========================
 # MAIN
 # =========================
-
 def main():
-    print("[OK] Conectando ao Google Drive...")
     drive_service = get_drive_service()
+    sheets_service = get_sheets_service()
 
-    print(f"[OK] Buscando pasta: {PASTA_GOOGLE_DRIVE}")
-    folder_id = get_folder_id(drive_service, PASTA_GOOGLE_DRIVE)
+    folder = drive_service.files().get(
+        fileId=NEW_FOLDER_ID,
+        fields="id,name,driveId",
+        supportsAllDrives=True
+    ).execute()
 
-    print("[OK] Listando arquivos CSV...")
-    csv_files = list_csv_files(drive_service, folder_id)
+    drive_id = folder["driveId"]
+    print(f"[OK] Pasta: {folder['name']}")
+
+    files = list_files(drive_service, NEW_FOLDER_ID, drive_id)
+
+    csv_files = [
+        f for f in files
+        if f["name"].lower().endswith(".csv")
+        and f["name"] != OUTPUT_CSV_NAME
+    ]
+
     print(f"[INFO] CSVs encontrados: {len(csv_files)}")
 
-    bancos = []
+    dfs = []
+    temp_files = []
 
     for f in csv_files:
-        nome = f["name"]
-
-        # =========================
-        # IGNORA ARQUIVO PROBLEMÁTICO
-        # =========================
-        if nome.strip() == ARQUIVO_IGNORADO:
-            print(f"[SKIP] Arquivo ignorado por regra: {nome}")
-            continue
-
-        print(f"[LOAD] {nome}")
+        name = f["name"].replace("/", "_")
+        download_file(drive_service, f["id"], name)
+        temp_files.append(name)
 
         try:
-            content = download_file(drive_service, f["id"])
-            df = pd.read_csv(io.BytesIO(content), sep=";", dtype=str, low_memory=False)
+            df = pd.read_csv(name, **READ_CSV_KWARGS)
 
-            linhas = len(df)
+            # 🔍 LOG DIAGNÓSTICO
+            log_dta_exec_stats(name, df)
 
-            # adiciona coluna de origem
-            df["arquivo_origem"] = nome
+            # 🧾 COLUNA DE ORIGEM
+            df["arquivo_origem"] = name
 
-            # métricas
-            preenchidos = df["dta_exec_srv"].notna().sum() if "dta_exec_srv" in df.columns else 0
-            vazios = linhas - preenchidos
-            perc = (preenchidos / linhas * 100) if linhas else 0
-
-            print(f"[LOG] {nome} | linhas: {linhas} | dta_exec_srv preenchidos: {preenchidos} | em branco/nulos: {vazios} | preenchimento: {perc:.2f}%")
-
-            bancos.append(df)
+            dfs.append(df)
 
         except Exception as e:
-            print(f"[ERRO] Falha ao ler {nome}: {e}")
+            print(f"[ERRO] {name}: {e}")
 
-    if not bancos:
-        raise Exception("Nenhum CSV válido foi processado.")
+    for f in temp_files:
+        try:
+            os.remove(f)
+        except:
+            pass
 
-    print("[OK] Concatenando arquivos...")
-    banco_df = pd.concat(bancos, ignore_index=True)
+    if not dfs:
+        print("[ERRO] Nenhum CSV válido.")
+        return
 
-    # =========================
-    # PRESERVA COLUNA ORIGEM
-    # =========================
+    banco_df = pd.concat(dfs, ignore_index=True).drop_duplicates()
+
+    # 🔎 LOG GLOBAL
+    total_rows = len(banco_df)
+    if 'dta_exec_srv' in banco_df.columns:
+        col = banco_df['dta_exec_srv']
+        non_empty = (col.astype(str).str.strip() != "").sum()
+        null_or_empty = total_rows - non_empty
+        pct = (non_empty / total_rows * 100) if total_rows > 0 else 0
+
+        print(
+            f"[GLOBAL] BANCO TOTAL | linhas: {total_rows} | "
+            f"dta_exec_srv preenchidos: {non_empty} | "
+            f"em branco/nulos: {null_or_empty} | "
+            f"preenchimento: {pct:.2f}%"
+        )
+
+    # ===== PRESERVA ORIGEM =====
     origem_col = banco_df["arquivo_origem"].copy()
 
-    # =========================
-    # MANTÉM COLUNAS PRINCIPAIS
-    # =========================
     banco_df = keep_only_columns_by_position(banco_df, KEEP_COL_POS_1BASED)
 
     banco_df.columns = [
@@ -153,30 +318,44 @@ def main():
         "total_servicos"
     ]
 
-    # =========================
-    # REAPLICA COLUNA H
-    # =========================
+    # reaplica coluna H
     banco_df["arquivo_origem"] = origem_col.values
 
-    # =========================
-    # EXPORTA
-    # =========================
-    banco_df.to_csv(OUTPUT_CSV, index=False, sep=";", encoding="utf-8-sig")
+    banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
+    banco_df["dta_exec_srv"] = pd.to_datetime(banco_df["dta_exec_srv"], errors="coerce")
+    banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
 
-    # =========================
-    # LOG FINAL
-    # =========================
-    total = len(banco_df)
-    preenchidos = banco_df["dta_exec_srv"].notna().sum()
-    vazios = total - preenchidos
-    perc = (preenchidos / total * 100) if total else 0
+    banco_df = convert_timestamp_to_string(banco_df)
 
-    print(f"[GLOBAL] BANCO TOTAL | linhas: {total} | dta_exec_srv preenchidos: {preenchidos} | em branco/nulos: {vazios} | preenchimento: {perc:.2f}%")
-    print(f"[OK] Arquivo gerado: {OUTPUT_CSV}")
+    banco_df = banco_df.sort_values(
+        by=["dta_exec_srv"],
+        ascending=True,
+        kind="mergesort"
+    ).reset_index(drop=True)
 
-# =========================
-# EXEC
-# =========================
+    banco_df.to_csv(
+        OUTPUT_CSV_NAME,
+        index=False,
+        encoding="utf-8-sig",
+        sep=";",
+        decimal=",",
+        float_format="%.2f"
+    )
+
+    upload_to_sheets(sheets_service, banco_df)
+
+    if UPLOAD_BANCO_PARA_DRIVE:
+        action = upload_or_update_banco(
+            drive_service,
+            folder_id=FOLDER_ID,
+            drive_id=drive_id,
+            local_path=OUTPUT_CSV_NAME,
+            filename=OUTPUT_CSV_NAME
+        )
+        print(f"[OK] BANCO.csv enviado ao Drive ({action}).")
+
+    print("[OK] Processo finalizado com sucesso.")
+
 
 if __name__ == "__main__":
     main()
