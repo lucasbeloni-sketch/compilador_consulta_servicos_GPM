@@ -203,11 +203,11 @@ def upload_to_sheets(service, df):
     # limpa apenas A:G
     clear_range(service, SPREADSHEET_ID, f"{SHEET_NAME}!A3:G")
 
-    # cola a partir de A3 somente A:G
+    # cola a partir de A3 somente A:G (modo interpretado)
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{SHEET_NAME}!A3",
-        valueInputOption="RAW",
+        valueInputOption="USER_ENTERED",   # <<< AQUI
         body={"values": values}
     ).execute()
 
@@ -218,10 +218,9 @@ def upload_to_sheets(service, df):
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{SHEET_NAME}!B1",
-        valueInputOption="RAW",
+        valueInputOption="USER_ENTERED",
         body={"values": [[timestamp]]}
     ).execute()
-
 
 # =========================
 # DATA FORMAT
