@@ -32,6 +32,7 @@ READ_CSV_KWARGS = dict(
     engine="python"
 )
 
+# +1 coluna agora (arquivo_origem)
 KEEP_COL_POS_1BASED = [47, 6, 27, 50, 52, 68, 70]
 
 # =========================
@@ -197,7 +198,7 @@ def upload_to_sheets(service, df):
     df = df.fillna("")
     values = df.values.tolist()
 
-    clear_range(service, SPREADSHEET_ID, f"{SHEET_NAME}!A3:E")
+    clear_range(service, SPREADSHEET_ID, f"{SHEET_NAME}!A3:H")
 
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
@@ -224,7 +225,6 @@ def upload_to_sheets(service, df):
 def convert_timestamp_to_string(df):
     if 'dta_exec_srv' in df.columns:
         df['dta_exec_srv'] = pd.to_datetime(df['dta_exec_srv'], errors='coerce', dayfirst=True)
-        df['dta_exec_srv'] = df['dta_exec_srv'].fillna(pd.NaT)
         df['dta_exec_srv'] = df['dta_exec_srv'].dt.strftime('%d/%m/%Y')
     return df
 
@@ -266,8 +266,11 @@ def main():
         try:
             df = pd.read_csv(name, **READ_CSV_KWARGS)
 
-            # 🔍 LOG DIAGNÓSTICO POR ARQUIVO
+            # 🔍 LOG DIAGNÓSTICO
             log_dta_exec_stats(name, df)
+
+            # 🧾 COLUNA DE ORIGEM
+            df["arquivo_origem"] = name
 
             dfs.append(df)
 
@@ -302,6 +305,7 @@ def main():
         )
 
     banco_df = keep_only_columns_by_position(banco_df, KEEP_COL_POS_1BASED)
+
     banco_df.columns = [
         "centro_servico",
         "Nota",
@@ -311,6 +315,9 @@ def main():
         "dta_exec_srv",
         "total_servicos"
     ]
+
+    # adiciona coluna H
+    banco_df["arquivo_origem"] = banco_df["arquivo_origem"]
 
     banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
     banco_df["dta_exec_srv"] = pd.to_datetime(banco_df["dta_exec_srv"], errors="coerce")
