@@ -17,14 +17,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-# =========================
-# CONFIG
-# =========================
-# ID do novo diretório para ler os arquivos CSV
 NEW_FOLDER_ID = "1QHtqMNCcIzNihwnu3copkNmBZnaL6Z6z"
 OUTPUT_CSV_NAME = "BANCO.csv"
-FOLDER_ID = "17IobcQeVLs83rUCqWKTi18yXiAPbupjf"  # Novo ID para upload do arquivo gerado no Drive
-SPREADSHEET_ID = "1B_ZAktVrIoY_qGg9vhjMabmNqGMeHODtWPR8nmFp61A"  # Novo ID da planilha Google Sheets
+FOLDER_ID = "17IobcQeVLs83rUCqWKTi18yXiAPbupjf"
+SPREADSHEET_ID = "1B_ZAktVrIoY_qGg9vhjMabmNqGMeHODtWPR8nmFp61A"
 SHEET_NAME = "BD_ConsultaServ"
 
 UPLOAD_BANCO_PARA_DRIVE = True
@@ -36,7 +32,6 @@ READ_CSV_KWARGS = dict(
     engine="python"
 )
 
-# Manter apenas as novas colunas
 KEEP_COL_POS_1BASED = [47, 6, 27, 50, 52, 68, 70]
 
 # =========================
@@ -101,7 +96,6 @@ def download_file(service, file_id, filename):
 
 
 def find_file_in_folder(service, folder_id, drive_id, filename):
-    # procura pelo arquivo no folder (para sobrescrever BANCO.csv sem gerar BANCO (1).csv)
     query = (
         f"'{folder_id}' in parents and trashed = false and "
         f"name = '{filename}'"
@@ -165,6 +159,31 @@ def to_number_ptbr(value):
 
 
 # =========================
+# LOG DIAGNÓSTICO
+# =========================
+def log_dta_exec_stats(filename, df):
+    total_rows = len(df)
+
+    if 'dta_exec_srv' in df.columns:
+        col = df['dta_exec_srv']
+        non_empty = (col.astype(str).str.strip() != "").sum()
+        null_or_empty = total_rows - non_empty
+        pct = (non_empty / total_rows * 100) if total_rows > 0 else 0
+
+        print(
+            f"[LOG] {filename} | linhas: {total_rows} | "
+            f"dta_exec_srv preenchidos: {non_empty} | "
+            f"em branco/nulos: {null_or_empty} | "
+            f"preenchimento: {pct:.2f}%"
+        )
+    else:
+        print(
+            f"[LOG] {filename} | linhas: {total_rows} | "
+            f"COLUNA 'dta_exec_srv' NÃO EXISTE"
+        )
+
+
+# =========================
 # SHEETS HELPERS
 # =========================
 def clear_range(service, spreadsheet_id, range_):
@@ -178,7 +197,6 @@ def upload_to_sheets(service, df):
     df = df.fillna("")
     values = df.values.tolist()
 
-    # limpa e cola a partir da A3
     clear_range(service, SPREADSHEET_ID, f"{SHEET_NAME}!A3:E")
 
     service.spreadsheets().values().update(
@@ -188,7 +206,6 @@ def upload_to_sheets(service, df):
         body={"values": values}
     ).execute()
 
-    # Timestamp horário de Brasília
     timestamp = datetime.now(
         ZoneInfo("America/Sao_Paulo")
     ).strftime("%d/%m/%Y %H:%M:%S")
@@ -202,19 +219,13 @@ def upload_to_sheets(service, df):
 
 
 # =========================
-# Função para garantir que a coluna de data seja convertida corretamente para o formato brasileiro
+# DATA FORMAT
+# =========================
 def convert_timestamp_to_string(df):
-    # Tratando a coluna 'dta_exec_srv' (coluna F) para garantir que está no formato correto
     if 'dta_exec_srv' in df.columns:
-        # Converte os valores da coluna para datetime, com erros sendo tratados
         df['dta_exec_srv'] = pd.to_datetime(df['dta_exec_srv'], errors='coerce', dayfirst=True)
-
-        # Substitui valores de data inválidos (NaT) por uma data padrão ou deixa como vazio
-        df['dta_exec_srv'] = df['dta_exec_srv'].fillna('01/01/1900')
-
-        # Formata a coluna de data para o formato brasileiro
+        df['dta_exec_srv'] = df['dta_exec_srv'].fillna(pd.NaT)
         df['dta_exec_srv'] = df['dta_exec_srv'].dt.strftime('%d/%m/%Y')
-
     return df
 
 
@@ -225,7 +236,6 @@ def main():
     drive_service = get_drive_service()
     sheets_service = get_sheets_service()
 
-    # Utilizando o novo folder ID para listar arquivos CSV
     folder = drive_service.files().get(
         fileId=NEW_FOLDER_ID,
         fields="id,name,driveId",
@@ -235,7 +245,6 @@ def main():
     drive_id = folder["driveId"]
     print(f"[OK] Pasta: {folder['name']}")
 
-    # Listando arquivos do novo diretório
     files = list_files(drive_service, NEW_FOLDER_ID, drive_id)
 
     csv_files = [
@@ -249,18 +258,22 @@ def main():
     dfs = []
     temp_files = []
 
-    # Baixando e processando arquivos CSV do novo diretório
     for f in csv_files:
         name = f["name"].replace("/", "_")
         download_file(drive_service, f["id"], name)
         temp_files.append(name)
 
         try:
-            dfs.append(pd.read_csv(name, **READ_CSV_KWARGS))
+            df = pd.read_csv(name, **READ_CSV_KWARGS)
+
+            # 🔍 LOG DIAGNÓSTICO POR ARQUIVO
+            log_dta_exec_stats(name, df)
+
+            dfs.append(df)
+
         except Exception as e:
             print(f"[ERRO] {name}: {e}")
 
-    # Limpando arquivos temporários baixados
     for f in temp_files:
         try:
             os.remove(f)
@@ -272,6 +285,21 @@ def main():
         return
 
     banco_df = pd.concat(dfs, ignore_index=True).drop_duplicates()
+
+    # 🔎 LOG GLOBAL
+    total_rows = len(banco_df)
+    if 'dta_exec_srv' in banco_df.columns:
+        col = banco_df['dta_exec_srv']
+        non_empty = (col.astype(str).str.strip() != "").sum()
+        null_or_empty = total_rows - non_empty
+        pct = (non_empty / total_rows * 100) if total_rows > 0 else 0
+
+        print(
+            f"[GLOBAL] BANCO TOTAL | linhas: {total_rows} | "
+            f"dta_exec_srv preenchidos: {non_empty} | "
+            f"em branco/nulos: {null_or_empty} | "
+            f"preenchimento: {pct:.2f}%"
+        )
 
     banco_df = keep_only_columns_by_position(banco_df, KEEP_COL_POS_1BASED)
     banco_df.columns = [
@@ -285,11 +313,9 @@ def main():
     ]
 
     banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
-
     banco_df["dta_exec_srv"] = pd.to_datetime(banco_df["dta_exec_srv"], errors="coerce")
     banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
 
-    # Chama a função para converter a coluna de data
     banco_df = convert_timestamp_to_string(banco_df)
 
     banco_df = banco_df.sort_values(
@@ -307,14 +333,12 @@ def main():
         float_format="%.2f"
     )
 
-    # ✅ Enviar os dados processados para a planilha do Google Sheets
     upload_to_sheets(sheets_service, banco_df)
 
-    # ✅ Upload/Update BANCO.csv no Drive (sem gerar BANCO (1).csv) no diretório original
     if UPLOAD_BANCO_PARA_DRIVE:
         action = upload_or_update_banco(
             drive_service,
-            folder_id=FOLDER_ID,  # Novo ID do diretório para o upload
+            folder_id=FOLDER_ID,
             drive_id=drive_id,
             local_path=OUTPUT_CSV_NAME,
             filename=OUTPUT_CSV_NAME
