@@ -32,16 +32,7 @@ READ_CSV_KWARGS = dict(
     engine="python"
 )
 
-# mapeamento por nome (robusto)
-COLUNAS_MAP = {
-    "centro_servico": "centro_servico",
-    "nota": "Nota",
-    "cod_pep_obra": "cod_pep_obra",
-    "equipe": "equipe",
-    "obs_servico": "obs_servico",
-    "dta_exec_srv": "dta_exec_srv",
-    "total_servicos": "total_servicos"
-}
+KEEP_COL_POS_1BASED = [47, 6, 27, 50, 52, 68, 70]
 
 # =========================
 # AUTH
@@ -58,14 +49,11 @@ def get_credentials():
         info, scopes=SCOPES
     )
 
-
 def get_drive_service():
     return build("drive", "v3", credentials=get_credentials())
 
-
 def get_sheets_service():
     return build("sheets", "v4", credentials=get_credentials())
-
 
 # =========================
 # DRIVE HELPERS
@@ -94,7 +82,6 @@ def list_files(service, folder_id, drive_id):
 
     return files
 
-
 def download_file(service, file_id, filename):
     request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
     with open(filename, "wb") as f:
@@ -103,13 +90,8 @@ def download_file(service, file_id, filename):
         while not done:
             _, done = downloader.next_chunk()
 
-
 def find_file_in_folder(service, folder_id, drive_id, filename):
-    query = (
-        f"'{folder_id}' in parents and trashed = false and "
-        f"name = '{filename}'"
-    )
-
+    query = f"'{folder_id}' in parents and trashed = false and name = '{filename}'"
     resp = service.files().list(
         q=query,
         fields="files(id,name)",
@@ -122,7 +104,6 @@ def find_file_in_folder(service, folder_id, drive_id, filename):
 
     files = resp.get("files", [])
     return files[0]["id"] if files else None
-
 
 def upload_or_update_banco(drive_service, folder_id, drive_id, local_path, filename):
     media = MediaFileUpload(local_path, mimetype="text/csv", resumable=True)
@@ -143,15 +124,18 @@ def upload_or_update_banco(drive_service, folder_id, drive_id, local_path, filen
     ).execute()
     return "created"
 
+# =========================
+# DATA HELPERS
+# =========================
+def keep_only_columns_by_position(df, positions_1based):
+    idx = [p - 1 for p in positions_1based]
+    return df.iloc[:, idx]
 
-# =========================
-# UTILS
-# =========================
 def to_number_ptbr(value):
     if value is None:
         return 0.0
     s = str(value).strip()
-    if s == "" or s.lower() in ("nan", "none", "null"):
+    if s == "" or s.lower() in ["nan", "none"]:
         return 0.0
     s = s.replace(" ", "")
     if "," in s:
@@ -161,9 +145,8 @@ def to_number_ptbr(value):
     except:
         return 0.0
 
-
 # =========================
-# SHEETS
+# SHEETS HELPERS
 # =========================
 def clear_range(service, spreadsheet_id, range_):
     service.spreadsheets().values().clear(
@@ -171,9 +154,8 @@ def clear_range(service, spreadsheet_id, range_):
         range=range_
     ).execute()
 
-
 def upload_to_sheets(service, df):
-    df_sheets = df.iloc[:, :7].copy()  # A:G
+    df_sheets = df.iloc[:, :7].copy()
     df_sheets = df_sheets.fillna("")
     values = df_sheets.values.tolist()
 
@@ -186,9 +168,7 @@ def upload_to_sheets(service, df):
         body={"values": values}
     ).execute()
 
-    timestamp = datetime.now(
-        ZoneInfo("America/Sao_Paulo")
-    ).strftime("%d/%m/%Y %H:%M:%S")
+    timestamp = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M:%S")
 
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
@@ -196,7 +176,6 @@ def upload_to_sheets(service, df):
         valueInputOption="USER_ENTERED",
         body={"values": [[timestamp]]}
     ).execute()
-
 
 # =========================
 # MAIN
@@ -234,25 +213,8 @@ def main():
 
         try:
             df = pd.read_csv(name, **READ_CSV_KWARGS)
-
-            # normaliza nomes
-            df.columns = [c.strip().lower() for c in df.columns]
-
-            # valida colunas obrigatórias
-            missing = [c for c in COLUNAS_MAP if c not in df.columns]
-            if missing:
-                print(f"[WARN] {name} ignorado. Colunas ausentes: {missing}")
-                continue
-
-            # seleciona por nome
-            df = df[list(COLUNAS_MAP.keys())].copy()
-            df.rename(columns=COLUNAS_MAP, inplace=True)
-
-            # coluna origem
             df["arquivo_origem"] = name
-
             dfs.append(df)
-
         except Exception as e:
             print(f"[ERRO] {name}: {e}")
 
@@ -268,36 +230,56 @@ def main():
 
     banco_df = pd.concat(dfs, ignore_index=True).drop_duplicates()
 
-    # ===== DATA SEGURA =====
+    origem_col = banco_df["arquivo_origem"].copy()
+
+    banco_df = keep_only_columns_by_position(banco_df, KEEP_COL_POS_1BASED)
+
+    banco_df.columns = [
+        "centro_servico",
+        "Nota",
+        "cod_pep_obra",
+        "equipe",
+        "obs_servico",
+        "dta_exec_srv",
+        "total_servicos"
+    ]
+
+    banco_df["arquivo_origem"] = origem_col.values
+
+    banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
+
+    # =========================
+    # TRATAMENTO ROBUSTO DE DATA
+    # =========================
     banco_df["dta_exec_srv"] = (
         banco_df["dta_exec_srv"]
         .astype(str)
         .str.strip()
-        .replace({"": None, "nan": None, "NaT": None})
+        .str.replace("\u200b", "", regex=False)
+        .str.replace("\xa0", " ", regex=False)
+        .replace({"": None, "nan": None, "NaT": None, "None": None})
     )
 
     banco_df["dta_exec_srv"] = pd.to_datetime(
         banco_df["dta_exec_srv"],
-        format="%d/%m/%Y",
-        errors="coerce"
+        errors="coerce",
+        dayfirst=True
     )
 
-    # log diagnóstico
-    print("[DEBUG] Datas inválidas:", banco_df["dta_exec_srv"].isna().sum())
+    total = len(banco_df)
+    validas = banco_df["dta_exec_srv"].notna().sum()
+    invalidas = total - validas
+    print(f"[DATA] Total: {total} | Válidas: {validas} | Inválidas: {invalidas}")
 
-    # ordenação real
+    banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
+
     banco_df = banco_df.sort_values(
         by="dta_exec_srv",
         ascending=True,
         kind="mergesort"
     ).reset_index(drop=True)
 
-    # volta para string
     banco_df["dta_exec_srv"] = banco_df["dta_exec_srv"].dt.strftime("%d/%m/%Y")
-
-    # normalizações
-    banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
-    banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
 
     banco_df.to_csv(
         OUTPUT_CSV_NAME,
@@ -321,7 +303,6 @@ def main():
         print(f"[OK] BANCO.csv enviado ao Drive ({action}).")
 
     print("[OK] Processo finalizado com sucesso.")
-
 
 if __name__ == "__main__":
     main()
