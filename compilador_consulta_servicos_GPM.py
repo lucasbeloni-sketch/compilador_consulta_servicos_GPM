@@ -4,6 +4,7 @@ import base64
 import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import re
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -40,7 +41,7 @@ KEEP_COL_POS_1BASED = [47, 6, 27, 50, 52, 68, 70]
 def get_credentials():
     secret = os.getenv("GOOGLE_CREDENTIALS_B64")
     if not secret:
-        raise ValueError("O secret 'GOOGLE_CREDENTIALS_B64' não foi encontrado ou está vazio!")
+        raise ValueError("O secret 'GOOGLE_CREDENTIALS_B64' não foi encontrado!")
 
     credentials_json = base64.b64decode(secret).decode("utf-8")
     info = json.loads(credentials_json)
@@ -92,6 +93,7 @@ def download_file(service, file_id, filename):
 
 def find_file_in_folder(service, folder_id, drive_id, filename):
     query = f"'{folder_id}' in parents and trashed = false and name = '{filename}'"
+
     resp = service.files().list(
         q=query,
         fields="files(id,name)",
@@ -135,7 +137,7 @@ def to_number_ptbr(value):
     if value is None:
         return 0.0
     s = str(value).strip()
-    if s == "" or s.lower() in ["nan", "none"]:
+    if s == "" or s.lower() in ("nan", "none"):
         return 0.0
     s = s.replace(" ", "")
     if "," in s:
@@ -144,6 +146,42 @@ def to_number_ptbr(value):
         return float(s)
     except:
         return 0.0
+
+# =========================
+# DATA PARSER ROBUSTO
+# =========================
+def parse_date_robusto(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.strip()
+
+    # limpeza pesada
+    s = (
+        s.str.replace("\u200b", "", regex=False)
+         .str.replace("\xa0", " ", regex=False)
+         .str.replace(r"\s+", " ", regex=True)
+         .str.replace("None", "", regex=False)
+         .str.replace("nan", "", regex=False)
+    )
+
+    # regex datas
+    regex = r"(\d{2}[\/\-.]\d{2}[\/\-.]\d{4}|\d{4}[\/\-.]\d{2}[\/\-.]\d{2})"
+    extracted = s.str.extract(regex, expand=False)
+
+    # normaliza separadores
+    extracted = extracted.str.replace("-", "/", regex=False).str.replace(".", "/", regex=False)
+
+    # parsing principal
+    parsed = pd.to_datetime(extracted, errors="coerce", dayfirst=True)
+
+    # fallback ISO
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(
+            extracted[mask],
+            errors="coerce",
+            format="%Y/%m/%d"
+        )
+
+    return parsed
 
 # =========================
 # SHEETS HELPERS
@@ -155,6 +193,7 @@ def clear_range(service, spreadsheet_id, range_):
     ).execute()
 
 def upload_to_sheets(service, df):
+    # apenas A:G
     df_sheets = df.iloc[:, :7].copy()
     df_sheets = df_sheets.fillna("")
     values = df_sheets.values.tolist()
@@ -168,7 +207,9 @@ def upload_to_sheets(service, df):
         body={"values": values}
     ).execute()
 
-    timestamp = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M:%S")
+    timestamp = datetime.now(
+        ZoneInfo("America/Sao_Paulo")
+    ).strftime("%d/%m/%Y %H:%M:%S")
 
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
@@ -247,31 +288,17 @@ def main():
     banco_df["arquivo_origem"] = origem_col.values
 
     banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
+    banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
 
     # =========================
-    # TRATAMENTO ROBUSTO DE DATA
+    # DATA ROBUSTA
     # =========================
-    banco_df["dta_exec_srv"] = (
-        banco_df["dta_exec_srv"]
-        .astype(str)
-        .str.strip()
-        .str.replace("\u200b", "", regex=False)
-        .str.replace("\xa0", " ", regex=False)
-        .replace({"": None, "nan": None, "NaT": None, "None": None})
-    )
-
-    banco_df["dta_exec_srv"] = pd.to_datetime(
-        banco_df["dta_exec_srv"],
-        errors="coerce",
-        dayfirst=True
-    )
+    banco_df["dta_exec_srv"] = parse_date_robusto(banco_df["dta_exec_srv"])
 
     total = len(banco_df)
     validas = banco_df["dta_exec_srv"].notna().sum()
     invalidas = total - validas
     print(f"[DATA] Total: {total} | Válidas: {validas} | Inválidas: {invalidas}")
-
-    banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
 
     banco_df = banco_df.sort_values(
         by="dta_exec_srv",
