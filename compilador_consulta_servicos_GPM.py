@@ -32,7 +32,16 @@ READ_CSV_KWARGS = dict(
     engine="python"
 )
 
-KEEP_COL_POS_1BASED = [47, 6, 27, 50, 52, 68, 70]
+# mapeamento por nome (robusto)
+COLUNAS_MAP = {
+    "centro_servico": "centro_servico",
+    "nota": "Nota",
+    "cod_pep_obra": "cod_pep_obra",
+    "equipe": "equipe",
+    "obs_servico": "obs_servico",
+    "dta_exec_srv": "dta_exec_srv",
+    "total_servicos": "total_servicos"
+}
 
 # =========================
 # AUTH
@@ -136,18 +145,13 @@ def upload_or_update_banco(drive_service, folder_id, drive_id, local_path, filen
 
 
 # =========================
-# DATA HELPERS
+# UTILS
 # =========================
-def keep_only_columns_by_position(df, positions_1based):
-    idx = [p - 1 for p in positions_1based]
-    return df.iloc[:, idx]
-
-
 def to_number_ptbr(value):
     if value is None:
         return 0.0
     s = str(value).strip()
-    if s == "" or s.lower() == "nan":
+    if s == "" or s.lower() in ("nan", "none", "null"):
         return 0.0
     s = s.replace(" ", "")
     if "," in s:
@@ -159,32 +163,7 @@ def to_number_ptbr(value):
 
 
 # =========================
-# LOG DIAGNÓSTICO
-# =========================
-def log_dta_exec_stats(filename, df):
-    total_rows = len(df)
-
-    if 'dta_exec_srv' in df.columns:
-        col = df['dta_exec_srv']
-        non_empty = (col.astype(str).str.strip() != "").sum()
-        null_or_empty = total_rows - non_empty
-        pct = (non_empty / total_rows * 100) if total_rows > 0 else 0
-
-        print(
-            f"[LOG] {filename} | linhas: {total_rows} | "
-            f"dta_exec_srv preenchidos: {non_empty} | "
-            f"em branco/nulos: {null_or_empty} | "
-            f"preenchimento: {pct:.2f}%"
-        )
-    else:
-        print(
-            f"[LOG] {filename} | linhas: {total_rows} | "
-            f"COLUNA 'dta_exec_srv' NÃO EXISTE"
-        )
-
-
-# =========================
-# SHEETS HELPERS
+# SHEETS
 # =========================
 def clear_range(service, spreadsheet_id, range_):
     service.spreadsheets().values().clear(
@@ -194,20 +173,16 @@ def clear_range(service, spreadsheet_id, range_):
 
 
 def upload_to_sheets(service, df):
-    # mantém apenas colunas A:G
-    df_sheets = df.iloc[:, :7].copy()
-
+    df_sheets = df.iloc[:, :7].copy()  # A:G
     df_sheets = df_sheets.fillna("")
     values = df_sheets.values.tolist()
 
-    # limpa apenas A:G
     clear_range(service, SPREADSHEET_ID, f"{SHEET_NAME}!A3:G")
 
-    # cola a partir de A3 somente A:G (modo interpretado)
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{SHEET_NAME}!A3",
-        valueInputOption="USER_ENTERED",   # <<< AQUI
+        valueInputOption="USER_ENTERED",
         body={"values": values}
     ).execute()
 
@@ -221,15 +196,6 @@ def upload_to_sheets(service, df):
         valueInputOption="USER_ENTERED",
         body={"values": [[timestamp]]}
     ).execute()
-
-# =========================
-# DATA FORMAT
-# =========================
-def convert_timestamp_to_string(df):
-    if 'dta_exec_srv' in df.columns:
-        df['dta_exec_srv'] = pd.to_datetime(df['dta_exec_srv'], errors='coerce', dayfirst=True)
-        df['dta_exec_srv'] = df['dta_exec_srv'].dt.strftime('%d/%m/%Y')
-    return df
 
 
 # =========================
@@ -269,10 +235,20 @@ def main():
         try:
             df = pd.read_csv(name, **READ_CSV_KWARGS)
 
-            # 🔍 LOG DIAGNÓSTICO
-            log_dta_exec_stats(name, df)
+            # normaliza nomes
+            df.columns = [c.strip().lower() for c in df.columns]
 
-            # 🧾 COLUNA DE ORIGEM
+            # valida colunas obrigatórias
+            missing = [c for c in COLUNAS_MAP if c not in df.columns]
+            if missing:
+                print(f"[WARN] {name} ignorado. Colunas ausentes: {missing}")
+                continue
+
+            # seleciona por nome
+            df = df[list(COLUNAS_MAP.keys())].copy()
+            df.rename(columns=COLUNAS_MAP, inplace=True)
+
+            # coluna origem
             df["arquivo_origem"] = name
 
             dfs.append(df)
@@ -292,58 +268,36 @@ def main():
 
     banco_df = pd.concat(dfs, ignore_index=True).drop_duplicates()
 
-    # 🔎 LOG GLOBAL
-    total_rows = len(banco_df)
-    if 'dta_exec_srv' in banco_df.columns:
-        col = banco_df['dta_exec_srv']
-        non_empty = (col.astype(str).str.strip() != "").sum()
-        null_or_empty = total_rows - non_empty
-        pct = (non_empty / total_rows * 100) if total_rows > 0 else 0
-
-        print(
-            f"[GLOBAL] BANCO TOTAL | linhas: {total_rows} | "
-            f"dta_exec_srv preenchidos: {non_empty} | "
-            f"em branco/nulos: {null_or_empty} | "
-            f"preenchimento: {pct:.2f}%"
-        )
-
-    # ===== PRESERVA ORIGEM =====
-    origem_col = banco_df["arquivo_origem"].copy()
-
-    banco_df = keep_only_columns_by_position(banco_df, KEEP_COL_POS_1BASED)
-
-    banco_df.columns = [
-        "centro_servico",
-        "Nota",
-        "cod_pep_obra",
-        "equipe",
-        "obs_servico",
-        "dta_exec_srv",
-        "total_servicos"
-    ]
-
-    # reaplica coluna H
-    banco_df["arquivo_origem"] = origem_col.values
-
-    banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
-    # converte para datetime real (formato brasileiro)
-    banco_df["dta_exec_srv"] = pd.to_datetime(
-        banco_df["dta_exec_srv"],
-        errors="coerce",
-        dayfirst=True
+    # ===== DATA SEGURA =====
+    banco_df["dta_exec_srv"] = (
+        banco_df["dta_exec_srv"]
+        .astype(str)
+        .str.strip()
+        .replace({"": None, "nan": None, "NaT": None})
     )
 
-    banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
+    banco_df["dta_exec_srv"] = pd.to_datetime(
+        banco_df["dta_exec_srv"],
+        format="%d/%m/%Y",
+        errors="coerce"
+    )
 
-    # ordenação cronológica real
+    # log diagnóstico
+    print("[DEBUG] Datas inválidas:", banco_df["dta_exec_srv"].isna().sum())
+
+    # ordenação real
     banco_df = banco_df.sort_values(
         by="dta_exec_srv",
         ascending=True,
         kind="mergesort"
     ).reset_index(drop=True)
 
-    # só depois da ordenação, converte para string dd/mm/yyyy
+    # volta para string
     banco_df["dta_exec_srv"] = banco_df["dta_exec_srv"].dt.strftime("%d/%m/%Y")
+
+    # normalizações
+    banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
+    banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
 
     banco_df.to_csv(
         OUTPUT_CSV_NAME,
