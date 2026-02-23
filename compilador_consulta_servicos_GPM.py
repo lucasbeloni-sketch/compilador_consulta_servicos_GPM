@@ -4,7 +4,6 @@ import base64
 import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import re
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -46,9 +45,7 @@ def get_credentials():
     credentials_json = base64.b64decode(secret).decode("utf-8")
     info = json.loads(credentials_json)
 
-    return service_account.Credentials.from_service_account_info(
-        info, scopes=SCOPES
-    )
+    return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
 
 def get_drive_service():
     return build("drive", "v3", credentials=get_credentials())
@@ -148,12 +145,13 @@ def to_number_ptbr(value):
         return 0.0
 
 # =========================
-# DATA PARSER ROBUSTO
+# DATA PARSER (POR ARQUIVO)
 # =========================
-def parse_date_robusto(series: pd.Series) -> pd.Series:
+DATE_REGEX = r"(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}|\d{4}[\/\-.]\d{1,2}[\/\-.]\d{1,2})"
+
+def extrair_data_string(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip()
 
-    # limpeza pesada
     s = (
         s.str.replace("\u200b", "", regex=False)
          .str.replace("\xa0", " ", regex=False)
@@ -162,26 +160,80 @@ def parse_date_robusto(series: pd.Series) -> pd.Series:
          .str.replace("nan", "", regex=False)
     )
 
-    # regex datas
-    regex = r"(\d{2}[\/\-.]\d{2}[\/\-.]\d{4}|\d{4}[\/\-.]\d{2}[\/\-.]\d{2})"
-    extracted = s.str.extract(regex, expand=False)
-
-    # normaliza separadores
+    extracted = s.str.extract(DATE_REGEX, expand=False)
     extracted = extracted.str.replace("-", "/", regex=False).str.replace(".", "/", regex=False)
+    return extracted
 
-    # parsing principal
-    parsed = pd.to_datetime(extracted, errors="coerce", dayfirst=True)
+def inferir_formato_por_arquivo(extracted_dates: pd.Series) -> str:
+    """
+    Retorna "DMY" ou "MDY" com base em datas não-ambíguas:
+    - Se primeiro número > 12 => DMY
+    - Se segundo número > 12 => MDY
+    """
+    parts = extracted_dates.dropna().str.split("/", expand=True)
+    if parts.empty or parts.shape[1] < 3:
+        return "DMY"  # padrão BR
 
-    # fallback ISO
-    mask = parsed.isna()
-    if mask.any():
-        parsed.loc[mask] = pd.to_datetime(
-            extracted[mask],
-            errors="coerce",
-            format="%Y/%m/%d"
-        )
+    a = pd.to_numeric(parts[0], errors="coerce")
+    b = pd.to_numeric(parts[1], errors="coerce")
 
-    return parsed
+    dmy_votes = ((a > 12) & (b <= 12)).sum()
+    mdy_votes = ((b > 12) & (a <= 12)).sum()
+
+    # Se não houver voto (só datas ambíguas), padrão BR
+    if dmy_votes == 0 and mdy_votes == 0:
+        return "DMY"
+
+    return "DMY" if dmy_votes >= mdy_votes else "MDY"
+
+def parse_date_por_arquivo(df: pd.DataFrame, col_data: str, col_arquivo: str) -> pd.Series:
+    extracted = extrair_data_string(df[col_data])
+
+    # normaliza ano com 2 dígitos (ex.: 01/02/24 -> 01/02/2024) se aparecer
+    def normalizar_ano(x: str) -> str:
+        if not isinstance(x, str) or x.strip() == "":
+            return x
+        p = x.split("/")
+        if len(p) != 3:
+            return x
+        # yyyy/mm/dd já está ok
+        if len(p[0]) == 4:
+            return x
+        # dd/mm/yy ou mm/dd/yy
+        if len(p[2]) == 2:
+            return f"{p[0]}/{p[1]}/20{p[2]}"
+        return x
+
+    extracted = extracted.apply(normalizar_ano)
+
+    parsed_final = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+
+    for arquivo, idxs in df.groupby(col_arquivo).groups.items():
+        ext_grp = extracted.loc[idxs]
+
+        formato = inferir_formato_por_arquivo(ext_grp)
+
+        # ISO (yyyy/mm/dd) sempre tenta primeiro
+        iso_mask = ext_grp.str.match(r"^\d{4}/\d{1,2}/\d{1,2}$", na=False)
+        if iso_mask.any():
+            parsed_final.loc[iso_mask.index[iso_mask]] = pd.to_datetime(
+                ext_grp.loc[iso_mask.index[iso_mask]],
+                errors="coerce",
+                format="%Y/%m/%d"
+            )
+
+        rest_idx = ext_grp.index[~iso_mask]
+        if len(rest_idx) > 0:
+            dayfirst = True if formato == "DMY" else False
+            parsed_final.loc[rest_idx] = pd.to_datetime(
+                ext_grp.loc[rest_idx],
+                errors="coerce",
+                dayfirst=dayfirst
+            )
+
+        print(f"[DATA] arquivo_origem={arquivo} | formato_inferido={formato} | amostras_validas={pd.to_datetime(ext_grp, errors='coerce', dayfirst=(formato=='DMY')).notna().sum()}")
+
+    return parsed_final
 
 # =========================
 # SHEETS HELPERS
@@ -193,7 +245,6 @@ def clear_range(service, spreadsheet_id, range_):
     ).execute()
 
 def upload_to_sheets(service, df):
-    # apenas A:G
     df_sheets = df.iloc[:, :7].copy()
     df_sheets = df_sheets.fillna("")
     values = df_sheets.values.tolist()
@@ -207,9 +258,7 @@ def upload_to_sheets(service, df):
         body={"values": values}
     ).execute()
 
-    timestamp = datetime.now(
-        ZoneInfo("America/Sao_Paulo")
-    ).strftime("%d/%m/%Y %H:%M:%S")
+    timestamp = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M:%S")
 
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
@@ -291,9 +340,9 @@ def main():
     banco_df["total_servicos"] = banco_df["total_servicos"].apply(to_number_ptbr)
 
     # =========================
-    # DATA ROBUSTA
+    # DATA ROBUSTA (POR ARQUIVO)
     # =========================
-    banco_df["dta_exec_srv"] = parse_date_robusto(banco_df["dta_exec_srv"])
+    banco_df["dta_exec_srv"] = parse_date_por_arquivo(banco_df, "dta_exec_srv", "arquivo_origem")
 
     total = len(banco_df)
     validas = banco_df["dta_exec_srv"].notna().sum()
@@ -306,6 +355,7 @@ def main():
         kind="mergesort"
     ).reset_index(drop=True)
 
+    # Formato BR garantido no CSV
     banco_df["dta_exec_srv"] = banco_df["dta_exec_srv"].dt.strftime("%d/%m/%Y")
 
     banco_df.to_csv(
